@@ -1,0 +1,220 @@
+import { useEffect, useCallback } from "react"
+import { createClient } from "@/lib/supabase/client"
+import type { RealtimeChannel } from "@supabase/supabase-js"
+import type { Repo, InventoryItem } from "@/lib/types"
+
+type RepoCallback = (payload: {
+  eventType: "INSERT" | "UPDATE" | "DELETE"
+  new: Repo | null
+  old: Partial<Repo> | null
+}) => void
+import { updateSession } from "@/lib/supabase/middleware"
+import { type NextRequest, NextResponse } from "next/server"
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl
+
+  // Let Supabase auth callback through without session checks
+  if (pathname.startsWith("/auth/callback")) {
+    return NextResponse.next()
+  }
+
+  return await updateSession(request)
+}
+
+export const config = {
+  matcher: [
+    /*
+     * Match all request paths except:
+     * - _next/static (static files)
+     * - _next/image (image optimization files)
+     * - favicon.ico
+     * - image files
+     */
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+  ],
+}
+
+type InventoryCallback = (payload: {
+  eventType: "INSERT" | "UPDATE" | "DELETE"
+  new: InventoryItem | null
+  old: Partial<InventoryItem> | null
+}) => void
+
+// ─────────────────────────────────────────────────────────
+// useRealtimeRepos
+// Subscribe to INSERT / UPDATE / DELETE on the repos table.
+// Call this once in the component that owns your repos state.
+//
+// Usage:
+//   useRealtimeRepos((payload) => {
+//     if (payload.eventType === "INSERT") setRepos(prev => [...prev, payload.new!])
+//     if (payload.eventType === "DELETE")  setRepos(prev => prev.filter(r => r.id !== payload.old!.id))
+//     if (payload.eventType === "UPDATE")  setRepos(prev => prev.map(r => r.id === payload.new!.id ? payload.new! : r))
+//   })
+// ─────────────────────────────────────────────────────────
+export function useRealtimeRepos(onEvent: RepoCallback) {
+  const stableOnEvent = useCallback(onEvent, []) // eslint-disable-line
+
+  useEffect(() => {
+    const supabase = createClient()
+    let channel: RealtimeChannel
+
+    channel = supabase
+      .channel("realtime:repos")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "repos" },
+        (payload) => {
+          stableOnEvent({
+            eventType: payload.eventType as "INSERT" | "UPDATE" | "DELETE",
+            new: (payload.new as Repo) ?? null,
+            old: (payload.old as Partial<Repo>) ?? null,
+          })
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [stableOnEvent])
+}
+
+// ─────────────────────────────────────────────────────────
+// useRealtimeInventory
+// Same pattern for the inventory table.
+// ─────────────────────────────────────────────────────────
+export function useRealtimeInventory(onEvent: InventoryCallback) {
+  const stableOnEvent = useCallback(onEvent, []) // eslint-disable-line
+
+  useEffect(() => {
+    const supabase = createClient()
+    let channel: RealtimeChannel
+
+    channel = supabase
+      .channel("realtime:inventory")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "inventory" },
+        (payload) => {
+          stableOnEvent({
+            eventType: payload.eventType as "INSERT" | "UPDATE" | "DELETE",
+            new: (payload.new as InventoryItem) ?? null,
+            old: (payload.old as Partial<InventoryItem>) ?? null,
+          })
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [stableOnEvent])
+}
+
+// ─────────────────────────────────────────────────────────
+// useRealtimeAll
+// Convenience hook: subscribe to both tables at once.
+// ─────────────────────────────────────────────────────────
+export function useRealtimeAll({
+  onRepo,
+  onInventory,
+}: {
+  onRepo: RepoCallback
+  onInventory: InventoryCallback
+}) {
+  useRealtimeRepos(onRepo)
+  useRealtimeInventory(onInventory)
+}
+
+"use client"
+
+// ─────────────────────────────────────────────────────────
+// HOW TO USE REALTIME IN YOUR COMPONENT
+//
+// Copy the relevant parts into your AppShell or whichever
+// client component manages repos / inventory state.
+// ─────────────────────────────────────────────────────────
+
+import { useState, useEffect } from "react"
+import { createClient } from "@/lib/supabase/client"
+import { useRealtimeAll } from "@/hooks/use-realtime"
+import { isAdmin } from "@/lib/utils"
+import type { User } from "@supabase/supabase-js"
+import type { Repo, InventoryItem } from "@/lib/types"
+
+// ── 1. Initial data fetch (runs once on mount) ────────────
+async function fetchAll() {
+  const supabase = createClient()
+
+  const [{ data: repos }, { data: inventory }] = await Promise.all([
+    supabase
+      .from("repos")
+      .select("*")
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("inventory")
+      .select("*")
+      .order("created_at", { ascending: false }),
+  ])
+
+  return {
+    repos: (repos ?? []) as Repo[],
+    inventory: (inventory ?? []) as InventoryItem[],
+  }
+}
+
+// ── 2. Component example ──────────────────────────────────
+export function AppShellWithRealtime({ user }: { user: User }) {
+  const [repos, setRepos] = useState<Repo[]>([])
+  const [inventory, setInventory] = useState<InventoryItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Initial load
+  useEffect(() => {
+    fetchAll().then(({ repos, inventory }) => {
+      setRepos(repos)
+      setInventory(inventory)
+      setLoading(false)
+    })
+  }, [])
+
+  // ── Realtime: keeps every open tab/device in sync ──────
+  useRealtimeAll({
+    onRepo: ({ eventType, new: n, old: o }) => {
+      setRepos((prev) => {
+        if (eventType === "INSERT" && n) return [n, ...prev]
+        if (eventType === "DELETE" && o?.id) return prev.filter((r) => r.id !== o.id)
+        if (eventType === "UPDATE" && n) return prev.map((r) => (r.id === n.id ? n : r))
+        return prev
+      })
+    },
+    onInventory: ({ eventType, new: n, old: o }) => {
+      setInventory((prev) => {
+        if (eventType === "INSERT" && n) return [n, ...prev]
+        if (eventType === "DELETE" && o?.id) return prev.filter((i) => i.id !== o.id)
+        if (eventType === "UPDATE" && n) return prev.map((i) => (i.id === n.id ? n : i))
+        return prev
+      })
+    },
+  })
+
+  // ── Admin check: Bono only visible to collection@amigocash.com ──
+  const admin = isAdmin(user.email)
+
+  if (loading) return <div>Cargando…</div>
+
+  return (
+    <div>
+      {/* Your existing UI here */}
+
+      {/* Bono column / section — only renders for admin */}
+      {admin && (
+        <div className="bono-section">
+          {/* Bono calculations, table column, etc. */}
+        </div>
+      )}
+    </div>
+  )
+}
