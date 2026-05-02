@@ -18,5 +18,14 @@
     "xlsx": "^0.18.5",
     "@supabase/supabase-js": "latest",
     "@supabase/ssr": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/node": "latest",
+    "autoprefixer": "latest",
+    "postcss": "latest",
+    "tailwindcss": "latest"
   }
 }
