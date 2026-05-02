@@ -1,59 +1,103 @@
-import { createServerClient } from "@supabase/ssr"
-import { cookies } from "next/headers"
-import { NextResponse, type NextRequest } from "next/server"
+import { useEffect, useCallback } from "react"
+import { createClient } from "@/lib/supabase/client"
+import type { RealtimeChannel } from "@supabase/supabase-js"
+import type { Repo, InventoryItem } from "@/lib/types"
 
-// This route is hit when Supabase redirects back after:
-//   - Email confirmation
-//   - Password recovery (magic link)
-//   - OAuth sign-in
+type RepoCallback = (payload: {
+  eventType: "INSERT" | "UPDATE" | "DELETE"
+  new: Repo | null
+  old: Partial<Repo> | null
+}) => void
+
+type InventoryCallback = (payload: {
+  eventType: "INSERT" | "UPDATE" | "DELETE"
+  new: InventoryItem | null
+  old: Partial<InventoryItem> | null
+}) => void
+
+// ─────────────────────────────────────────────────────────
+// useRealtimeRepos
+// Subscribe to INSERT / UPDATE / DELETE on the repos table.
+// Call this once in the component that owns your repos state.
 //
-// Make sure your Supabase dashboard has this URL in:
-//   Authentication → URL Configuration → Redirect URLs
-//   e.g.  https://yourapp.vercel.app/auth/callback
-//         http://localhost:3000/auth/callback
+// Usage:
+//   useRealtimeRepos((payload) => {
+//     if (payload.eventType === "INSERT") setRepos(prev => [...prev, payload.new!])
+//     if (payload.eventType === "DELETE")  setRepos(prev => prev.filter(r => r.id !== payload.old!.id))
+//     if (payload.eventType === "UPDATE")  setRepos(prev => prev.map(r => r.id === payload.new!.id ? payload.new! : r))
+//   })
+// ─────────────────────────────────────────────────────────
+export function useRealtimeRepos(onEvent: RepoCallback) {
+  const stableOnEvent = useCallback(onEvent, []) // eslint-disable-line
 
-export async function GET(request: NextRequest) {
-  const requestUrl = new URL(request.url)
-  const code = requestUrl.searchParams.get("code")
-  const next = requestUrl.searchParams.get("next") ?? "/"
+  useEffect(() => {
+    const supabase = createClient()
+    let channel: RealtimeChannel
 
-  if (code) {
-    const cookieStore = await cookies()
+    channel = supabase
+      .channel("realtime:repos")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "repos" },
+        (payload) => {
+          stableOnEvent({
+            eventType: payload.eventType as "INSERT" | "UPDATE" | "DELETE",
+            new: (payload.new as Repo) ?? null,
+            old: (payload.old as Partial<Repo>) ?? null,
+          })
+        }
+      )
+      .subscribe()
 
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() {
-            return cookieStore.getAll()
-          },
-          setAll(cookiesToSet) {
-            try {
-              cookiesToSet.forEach(({ name, value, options }) =>
-                cookieStore.set(name, value, options)
-              )
-            } catch {
-              // Server component – ignored
-            }
-          },
-        },
-      }
-    )
-
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
-
-    if (!error) {
-      // Password recovery → send to reset page
-      if (next.startsWith("/auth/reset-password")) {
-        return NextResponse.redirect(new URL("/auth/reset-password", request.url))
-      }
-      return NextResponse.redirect(new URL(next, request.url))
+    return () => {
+      supabase.removeChannel(channel)
     }
-  }
+  }, [stableOnEvent])
+}
 
-  // Fallback: something went wrong
-  return NextResponse.redirect(
-    new URL("/auth/forgot-password?error=link-expired", request.url)
-  )
+// ─────────────────────────────────────────────────────────
+// useRealtimeInventory
+// Same pattern for the inventory table.
+// ─────────────────────────────────────────────────────────
+export function useRealtimeInventory(onEvent: InventoryCallback) {
+  const stableOnEvent = useCallback(onEvent, []) // eslint-disable-line
+
+  useEffect(() => {
+    const supabase = createClient()
+    let channel: RealtimeChannel
+
+    channel = supabase
+      .channel("realtime:inventory")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "inventory" },
+        (payload) => {
+          stableOnEvent({
+            eventType: payload.eventType as "INSERT" | "UPDATE" | "DELETE",
+            new: (payload.new as InventoryItem) ?? null,
+            old: (payload.old as Partial<InventoryItem>) ?? null,
+          })
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [stableOnEvent])
+}
+
+// ─────────────────────────────────────────────────────────
+// useRealtimeAll
+// Convenience hook: subscribe to both tables at once.
+// ─────────────────────────────────────────────────────────
+export function useRealtimeAll({
+  onRepo,
+  onInventory,
+}: {
+  onRepo: RepoCallback
+  onInventory: InventoryCallback
+}) {
+  useRealtimeRepos(onRepo)
+  useRealtimeInventory(onInventory)
 }
